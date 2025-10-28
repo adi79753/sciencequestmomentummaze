@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Momentum Maze — Final Level</title>
+<style>
+  body { background:#111; color:#fff; font-family:system-ui,Arial; text-align:center; margin:0; }
+  canvas { background:#222; display:block; margin:12px auto; border:2px solid #444; }
+  #hud { max-width:900px; margin:6px auto; text-align:left; font-size:14px; }
+  .hud-row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .hud-block { background:#1b1b1b; padding:8px 10px; border-radius:6px; }
+  #overlay {
+    position:fixed; inset:0; display:flex; flex-direction:column;
+    justify-content:center; align-items:center; background:rgba(0,0,0,0.85);
+  }
+  button {
+    background:#333; color:white; padding:8px 14px; border:1px solid #555;
+    border-radius:6px; cursor:pointer; font-size:16px;
+  }
+  button:hover { background:#444; }
+</style>
+</head>
+<body>
+<h1>Momentum Maze — Final Level</h1>
+
+<div id="hud">
+  <div class="hud-row">
+    <div class="hud-block">Player mass: <span id="playerMass">10</span> kg</div>
+    <div class="hud-block">Projectile mass: <span id="projMass">1</span> kg</div>
+    <div class="hud-block">Targets left: <span id="targetsLeft">3</span></div>
+    <div class="hud-block">Cooldown: <span id="cd">Ready</span></div>
+    <div class="hud-block">  Time left: <span id="timeLeft">30.0</span> s</div>
+  </div>
+  <div style="margin-top:6px">
+    Player velocity: vx = <span id="vx">0.00</span> m/s, vy = <span id="vy">0.00</span> m/s, |v| = <span id="vmag">0.00</span> m/s
+  </div>
+</div>
+
+<canvas id="gameCanvas" width="800" height="600"></canvas>
+
+<div id="overlay">
+  <div id="msgText">Momentum Maze</div>
+  <button id="startBtn">Start Game</button>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const playerMassEl = document.getElementById('playerMass');
+const projMassEl = document.getElementById('projMass');
+const targetsLeftEl = document.getElementById('targetsLeft');
+const cdEl = document.getElementById('cd');
+const vxEl = document.getElementById('vx');
+const vyEl = document.getElementById('vy');
+const vmagEl = document.getElementById('vmag');
+const timeLeftEl = document.getElementById('timeLeft');
+const overlay = document.getElementById('overlay');
+const msgText = document.getElementById('msgText');
+const startBtn = document.getElementById('startBtn');
+
+const metersPerPx = 0.02;
+const projectileMass = 1;
+const playerMass = 10;
+const projectilePxPerFrame = 12;
+const assumedFps = 60;
+const projectileSpeed = projectilePxPerFrame * assumedFps;
+const projectileLifeMs = 600;
+const cooldownMs = 500;
+let lastShotTime = -Infinity;
+let gameRunning = false;
+let timer = 30;
+let score = 0;
+
+// Player and game state
+const player = { x:60, y:canvas.height-70, size:22, vx:0, vy:0 };
+const projectiles = [];
+const explosions = [];
+const targets = [];
+
+// Walls
+const walls = [
+  {x:0,y:0,width:800,height:20}, {x:0,y:0,width:20,height:600},
+  {x:0,y:580,width:800,height:20}, {x:780,y:0,width:20,height:600},
+  {x:80,y:60,width:180,height:28}, {x:300,y:40,width:240,height:24}, {x:620,y:40,width:120,height:40},
+  {x:50,y:140,width:220,height:26}, {x:320,y:120,width:80,height:24}, {x:450,y:110,width:160,height:28},
+  {x:150,y:200,width:260,height:22}, {x:420,y:220,width:28,height:140}, {x:180,y:260,width:120,height:26},
+  {x:70,y:340,width:200,height:28}, {x:320,y:320,width:220,height:22}, {x:620,y:300,width:140,height:26},
+  {x:220,y:400,width:28,height:140}, {x:80,y:460,width:180,height:26},
+  {x:420,y:480,width:300,height:26}, {x:340,y:460,width:28,height:100},
+  {x:520,y:180,width:24,height:120}, {x:580,y:220,width:28,height:80}
+];
+
+function rectsOverlap(ax,ay,aw,ah,bx,by,bw,bh){
+  return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+}
+
+function pointClear(px,py,w,h){
+  if (px < 30 || px > canvas.width - 30 || py < 30 || py > canvas.height - 30) return false;
+  for (const wall of walls)
+    if (rectsOverlap(px,py,w,h, wall.x,wall.y,wall.width,wall.height)) return false;
+  return true;
+}
+
+function placeRandomTargets(n){
+  targets.length = 0;
+  let attempts = 0;
+  while (targets.length < n && attempts < 1000) {
+    attempts++;
+    const x = Math.floor(40 + Math.random()*(canvas.width - 80));
+    const y = Math.floor(40 + Math.random()*(canvas.height - 80));
+    if (!pointClear(x,y,18,18)) continue;
+    if (Math.hypot(x - player.x, y - player.y) < 80) continue;
+    if (targets.some(t => rectsOverlap(x,y,18,18,t.x,t.y,t.size,t.size))) continue;
+    targets.push({x,y,size:18});
+  }
+  targetsLeftEl.innerText = targets.length;
+}
+
+// --- Shooting and momentum ---
+function tryShoot(dirX, dirY) {
+  const now = performance.now();
+  if (now - lastShotTime < cooldownMs) return;
+  lastShotTime = now;
+  cdEl.innerText = 'Cooldown';
+  setTimeout(()=>cdEl.innerText='Ready', cooldownMs);
+
+  const projVx = dirX * projectileSpeed;
+  const projVy = dirY * projectileSpeed;
+  const px = player.x + player.size/2 + dirX*(player.size/2 + 8);
+  const py = player.y + player.size/2 + dirY*(player.size/2 + 8);
+  projectiles.push({x:px,y:py,vx:projVx,vy:projVy,born:now});
+
+  // recoil momentum
+  const momX = projectileMass * projVx * metersPerPx;
+  const momY = projectileMass * projVy * metersPerPx;
+  const recoilX = -momX / playerMass / metersPerPx;
+  const recoilY = -momY / playerMass / metersPerPx;
+  player.vx += recoilX;
+  player.vy += recoilY;
+}
+
+// Input
+window.addEventListener('keydown', e => {
+  if (!gameRunning) return;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
+  if (e.key==='ArrowUp') tryShoot(0,-1);
+  if (e.key==='ArrowDown') tryShoot(0,1);
+  if (e.key==='ArrowLeft') tryShoot(-1,0);
+  if (e.key==='ArrowRight') tryShoot(1,0);
+});
+
+// Movement (no slowdown — only stop on collision)
+function movePlayer(dt){
+  let nextX = player.x + player.vx * dt;
+  let nextY = player.y + player.vy * dt;
+
+  if (!walls.some(w => rectsOverlap(nextX, player.y, player.size, player.size, w.x,w.y,w.width,w.height)))
+    player.x = nextX;
+  else player.vx = 0;
+
+  if (!walls.some(w => rectsOverlap(player.x, nextY, player.size, player.size, w.x,w.y,w.width,w.height)))
+    player.y = nextY;
+  else player.vy = 0;
+
+  player.x = Math.max(1, Math.min(canvas.width - player.size - 1, player.x));
+  player.y = Math.max(1, Math.min(canvas.height - player.size - 1, player.y));
+}
+
+// Projectiles + target hits
+function updateProjectiles(now,dt){
+  for (let i=projectiles.length-1;i>=0;i--){
+    const p = projectiles[i];
+    p.x += p.vx*dt;
+    p.y += p.vy*dt;
+    if (now-p.born>projectileLifeMs) { projectiles.splice(i,1); continue; }
+    if (walls.some(w=>rectsOverlap(p.x-5,p.y-5,10,10,w.x,w.y,w.width,w.height))) {
+      projectiles.splice(i,1);
+      continue;
+    }
+    for (let j=targets.length-1;j>=0;j--){
+      const t = targets[j];
+      if (rectsOverlap(p.x-5,p.y-5,10,10,t.x,t.y,t.size,t.size)) {
+        targets.splice(j,1);
+        projectiles.splice(i,1);
+        explosions.push({x:t.x+t.size/2,y:t.y+t.size/2,r:5,life:0.3});
+        score++;
+        targetsLeftEl.innerText = targets.length;
+        if (targets.length===0) endGame(true);
+        break;
+      }
+    }
+  }
+}
+
+// Explosion animation
+function updateExplosions(dt){
+  for (let i=explosions.length-1;i>=0;i--){
+    const e = explosions[i];
+    e.r += 120*dt;
+    e.life -= dt;
+    if (e.life<=0) explosions.splice(i,1);
+  }
+}
+
+// Timer
+function updateTimer(dt){
+  timer -= dt;
+  if (timer <= 0) {
+    endGame(false);
+  }
+  timeLeftEl.innerText = timer.toFixed(1);
+}
+
+// Draw
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='#555'; walls.forEach(w=>ctx.fillRect(w.x,w.y,w.width,w.height));
+  ctx.fillStyle='lime'; targets.forEach(t=>ctx.fillRect(t.x,t.y,t.size,t.size));
+  ctx.fillStyle='yellow'; ctx.fillRect(player.x,player.y,player.size,player.size);
+  ctx.fillStyle='orange'; projectiles.forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,5,0,Math.PI*2);ctx.fill();});
+  explosions.forEach(e=>{
+    ctx.beginPath();
+    ctx.arc(e.x,e.y,e.r,0,Math.PI*2);
+    ctx.strokeStyle=`rgba(255,200,50,${Math.max(0,e.life*3)})`;
+    ctx.lineWidth=2;
+    ctx.stroke();
+  });
+}
+
+function endGame(win){
+  gameRunning=false;
+  overlay.style.display='flex';
+  msgText.textContent = win ? '  Level Complete!' : '  Time\'s up! Try again.';
+}
+
+function resetGame(){
+  player.x=60;player.y=canvas.height-70;player.vx=0;player.vy=0;
+  projectiles.length=0;explosions.length=0;score=0;
+  placeRandomTargets(3);
+  timer=30;cdEl.innerText='Ready';
+  gameRunning=true;
+  overlay.style.display='none';
+}
+
+// Game loop
+let lastTime=performance.now();
+function loop(now){
+  const dt=Math.min(0.05,(now-lastTime)/1000);
+  lastTime=now;
+  if (gameRunning){
+    movePlayer(dt);
+    updateProjectiles(now,dt);
+    updateExplosions(dt);
+    updateTimer(dt);
+    const vx_m_s=player.vx*metersPerPx;
+    const vy_m_s=player.vy*metersPerPx;
+    vxEl.textContent=vx_m_s.toFixed(2);
+    vyEl.textContent=vy_m_s.toFixed(2);
+    vmagEl.textContent=Math.hypot(vx_m_s,vy_m_s).toFixed(2);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Start button
+startBtn.onclick = ()=>resetGame();
+playerMassEl.textContent=playerMass.toFixed(1);
+projMassEl.textContent=projectileMass.toFixed(1);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
+
